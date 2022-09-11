@@ -112,7 +112,7 @@ pub struct PDLSecondMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EphEcKeyPair {
     pub public_share: Point<Secp256k1>,
-    secret_share: Scalar<Secp256k1>,
+    pub secret_share: Scalar<Secp256k1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +133,12 @@ pub struct EphKeyGenFirstMsg {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EphKeyGenSecondMsg {
     pub comm_witness: EphCommWitness,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdaptorSignature {
+    pub s: BigInt,
+    pub r_x: BigInt,
 }
 
 //****************** End: Party Two structs ******************//
@@ -312,22 +318,26 @@ impl PaillierPublic {
 }
 
 impl EphKeyGenFirstMsg {
+    // P2's first massage (phase 2)
     pub fn create_commitments() -> (EphKeyGenFirstMsg, EphCommWitness, EphEcKeyPair) {
-        let base = Point::generator();
+        let k2 = Scalar::<Secp256k1>::random();
 
-        let secret_share = Scalar::<Secp256k1>::random();
+        Self::commit_to_dlog(&k2)
+    }
 
-        let public_share = base * &secret_share;
-
+    pub fn commit_to_dlog(x: &Scalar<Secp256k1>) -> (EphKeyGenFirstMsg, EphCommWitness, EphEcKeyPair) {
+        let g = Point::generator();
         let h = Point::<Secp256k1>::base_point2();
 
-        let c = h * &secret_share;
+        let x_pub = g * x;
+
+        let c = h * x;
         let w = ECDDHWitness {
-            x: secret_share.clone(),
+            x: x.clone(),
         };
         let delta = ECDDHStatement {
-            g1: base.to_point(),
-            h1: public_share.clone(),
+            g1: g.to_point(),
+            h1: x_pub.clone(),
             g2: h.clone(),
             h2: c.clone(),
         };
@@ -337,7 +347,7 @@ impl EphKeyGenFirstMsg {
         let pk_commitment_blind_factor = BigInt::sample(SECURITY_BITS);
         let pk_commitment =
             HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
-                &BigInt::from_bytes(public_share.to_bytes(true).as_ref()),
+                &BigInt::from_bytes(x_pub.to_bytes(true).as_ref()),
                 &pk_commitment_blind_factor,
             );
 
@@ -351,9 +361,10 @@ impl EphKeyGenFirstMsg {
             );
 
         let ec_key_pair = EphEcKeyPair {
-            public_share,
-            secret_share,
+            public_share: x_pub,
+            secret_share: x.clone(),
         };
+
         (
             EphKeyGenFirstMsg {
                 pk_commitment,
@@ -388,6 +399,7 @@ impl EphKeyGenSecondMsg {
 }
 
 impl PartialSig {
+    // P2's second message (phase 4)
     pub fn compute(
         ek: &EncryptionKey,
         encrypted_secret_share: &BigInt,
@@ -419,6 +431,29 @@ impl PartialSig {
         //c3:
         PartialSig {
             c3: Paillier::add(ek, c2, c1).0.into_owned(),
+        }
+    }
+}
+
+impl AdaptorSignature {
+    // P2 generate output (phase 6)
+    pub fn compute(
+        sd_prime: &Scalar<Secp256k1>,
+        y: &Scalar<Secp256k1>,
+        r1_pub: &Point<Secp256k1>,
+        r3: &Scalar<Secp256k1>,
+    ) -> Self {
+        let y_inv = y.invert().unwrap();
+        // compute s = s'' * y^-1
+        let s = y_inv * sd_prime;
+        let s = s.to_bigint();
+
+        let r = r1_pub * r3;
+        let r_x = r.x_coord().unwrap();
+
+        Self {
+            s,
+            r_x
         }
     }
 }

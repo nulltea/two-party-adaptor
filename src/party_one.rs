@@ -86,9 +86,8 @@ pub struct SignatureRecid {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Signature {
-    pub s: BigInt,
-    pub r: BigInt,
+pub struct Party1PartialAdaptor {
+    pub sd_prime: BigInt,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -399,6 +398,7 @@ impl PaillierKeyPair {
 }
 
 impl EphKeyGenFirstMsg {
+    // P1's  first massage (phase 1)
     pub fn create() -> (EphKeyGenFirstMsg, EphEcKeyPair) {
         let base = Point::generator();
         let secret_share = Scalar::<Secp256k1>::random();
@@ -432,6 +432,7 @@ impl EphKeyGenFirstMsg {
 }
 
 impl EphKeyGenSecondMsg {
+    // P1's second message (phase 4)
     pub fn verify_commitments_and_dlog_proof(
         party_two_first_message: &Party2EphKeyGenFirstMessage,
         party_two_second_message: &Party2EphKeyGenSecondMessage,
@@ -480,115 +481,146 @@ impl EphKeyGenSecondMsg {
     }
 }
 
-impl Signature {
+impl Party1PartialAdaptor {
+    // P1's third message (phase 5)
     pub fn compute(
         party_one_private: &Party1Private,
+        party_one_public: &Point<Secp256k1>,
         partial_sig_c3: &BigInt,
         ephemeral_local_share: &EphEcKeyPair,
         ephemeral_other_public_share: &Point<Secp256k1>,
-    ) -> Signature {
-        //compute r = k2* R1
-        let r = ephemeral_other_public_share * &ephemeral_local_share.secret_share;
-
-        let rx = r
-            .x_coord()
-            .unwrap()
-            .mod_floor(Scalar::<Secp256k1>::group_order());
-
-        let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
+        r3_pub: &Point<Secp256k1>,
+        message: &BigInt,
+    ) -> Party1PartialAdaptor {
+        // compute r = k1 * R3
+        let r = r3_pub * &ephemeral_local_share.secret_share;
+        let rx = Scalar::<Secp256k1>::from_bigint(&r.x_coord().unwrap()
+            .mod_floor(Scalar::<Secp256k1>::group_order()));
 
         let s_tag = Paillier::decrypt(
             &party_one_private.paillier_priv,
             &RawCiphertext::from(partial_sig_c3),
         )
-        .0;
-        let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
-        let s_tag_tag = s_tag_fe * k1_inv;
-        let s_tag_tag_bn = s_tag_tag.to_bigint();
+            .0;
+        let s_prime = Scalar::<Secp256k1>::from_bigint(&s_tag.mod_floor(Scalar::<Secp256k1>::group_order()));
 
-        let s = cmp::min(
-            s_tag_tag_bn.clone(),
-            Scalar::<Secp256k1>::group_order().clone() - s_tag_tag_bn,
-        );
+        let r2s = ephemeral_other_public_share * &s_prime;
 
-        Signature { s, r: rx }
-    }
+        // compute U = r * Q + m * G.
+        let r_q = party_one_public * &rx;
+        let m_gen = Point::<Secp256k1>::generator() * Scalar::<Secp256k1>::from_bigint(&message);
+        let u = r_q + m_gen;
 
-    pub fn compute_with_recid(
-        party_one_private: &Party1Private,
-        partial_sig_c3: &BigInt,
-        ephemeral_local_share: &EphEcKeyPair,
-        ephemeral_other_public_share: &Point<Secp256k1>,
-    ) -> SignatureRecid {
-        //compute r = k2* R1
-        let r = ephemeral_other_public_share * &ephemeral_local_share.secret_share;
-
-        let rx = r
-            .x_coord()
-            .unwrap()
-            .mod_floor(Scalar::<Secp256k1>::group_order());
-        let ry = r
-            .y_coord()
-            .unwrap()
-            .mod_floor(Scalar::<Secp256k1>::group_order());
-        let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
-
-        let s_tag = Paillier::decrypt(
-            &party_one_private.paillier_priv,
-            &RawCiphertext::from(partial_sig_c3),
-        )
-        .0;
-        let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
-        let s_tag_tag = s_tag_fe * k1_inv;
-        let s_tag_tag_bn = s_tag_tag.to_bigint();
-        let s = cmp::min(
-            s_tag_tag_bn.clone(),
-            Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn,
-        );
-
-        /*
-         Calculate recovery id - it is not possible to compute the public key out of the signature
-         itself. Recovery id is used to enable extracting the public key uniquely.
-         1. id = R.y & 1
-         2. if (s > curve.q / 2) id = id ^ 1
-        */
-        let is_ry_odd = ry.test_bit(0);
-        let mut recid = if is_ry_odd { 1 } else { 0 };
-        if s_tag_tag_bn > Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn {
-            recid ^= 1;
+        if *ephemeral_other_public_share == u {
+            panic!("invalid pre-signature")
         }
 
-        SignatureRecid { s, r: rx, recid }
+        // compute r = k1* R2
+        let r = ephemeral_other_public_share.clone() * &ephemeral_local_share.secret_share;
+
+        let rx = r
+            .x_coord()
+            .unwrap()
+            .mod_floor(Scalar::<Secp256k1>::group_order());
+
+        let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
+
+        let sd_prime = k1_inv * &s_prime;
+
+        // let s_tag = Paillier::decrypt(
+        //     &party_one_private.paillier_priv,
+        //     &RawCiphertext::from(partial_sig_c3),
+        // )
+        // .0;
+        // let s_prime_tag = s_tag.mod_floor(Scalar::<Secp256k1>::group_order());
+        //
+        // let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
+        // let s_tag_tag = s_tag_fe * k1_inv;
+        // let s_tag_tag_bn = s_tag_tag.to_bigint();
+        //
+        // let s = cmp::min(
+        //     s_tag_tag_bn.clone(),
+        //     Scalar::<Secp256k1>::group_order().clone() - s_tag_tag_bn,
+        // );
+
+        Party1PartialAdaptor { sd_prime: sd_prime.to_bigint() }
     }
+
+    // pub fn compute_with_recid(
+    //     party_one_private: &Party1Private,
+    //     partial_sig_c3: &BigInt,
+    //     ephemeral_local_share: &EphEcKeyPair,
+    //     ephemeral_other_public_share: &Point<Secp256k1>,
+    // ) -> SignatureRecid {
+    //     //compute r = k2* R1
+    //     let r = ephemeral_other_public_share * &ephemeral_local_share.secret_share;
+    //
+    //     let rx = r
+    //         .x_coord()
+    //         .unwrap()
+    //         .mod_floor(Scalar::<Secp256k1>::group_order());
+    //     let ry = r
+    //         .y_coord()
+    //         .unwrap()
+    //         .mod_floor(Scalar::<Secp256k1>::group_order());
+    //     let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
+    //
+    //     let s_tag = Paillier::decrypt(
+    //         &party_one_private.paillier_priv,
+    //         &RawCiphertext::from(partial_sig_c3),
+    //     )
+    //     .0;
+    //     let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
+    //     let s_tag_tag = s_tag_fe * k1_inv;
+    //     let s_tag_tag_bn = s_tag_tag.to_bigint();
+    //     let s = cmp::min(
+    //         s_tag_tag_bn.clone(),
+    //         Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn,
+    //     );
+    //
+    //     /*
+    //      Calculate recovery id - it is not possible to compute the public key out of the signature
+    //      itself. Recovery id is used to enable extracting the public key uniquely.
+    //      1. id = R.y & 1
+    //      2. if (s > curve.q / 2) id = id ^ 1
+    //     */
+    //     let is_ry_odd = ry.test_bit(0);
+    //     let mut recid = if is_ry_odd { 1 } else { 0 };
+    //     if s_tag_tag_bn > Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn {
+    //         recid ^= 1;
+    //     }
+    //
+    //     SignatureRecid { s, r: rx, recid }
+    // }
 }
-
-pub fn verify(
-    signature: &Signature,
-    pubkey: &Point<Secp256k1>,
-    message: &BigInt,
-) -> Result<(), multi_party_ecdsa::Error> {
-    let s_fe = Scalar::<Secp256k1>::from(&signature.s);
-    let rx_fe = Scalar::<Secp256k1>::from(&signature.r);
-
-    let s_inv_fe = s_fe.invert().unwrap();
-    let e_fe: Scalar<Secp256k1> =
-        Scalar::<Secp256k1>::from(&message.mod_floor(Scalar::<Secp256k1>::group_order()));
-    let u1 = Point::generator() * e_fe * &s_inv_fe;
-    let u2 = &*pubkey * rx_fe * &s_inv_fe;
-
-    // second condition is against malleability
-    let rx_bytes = &BigInt::to_bytes(&signature.r)[..];
-    let u1_plus_u2_bytes = &BigInt::to_bytes(&(u1 + u2).x_coord().unwrap())[..];
-
-    if rx_bytes.ct_eq(u1_plus_u2_bytes).unwrap_u8() == 1
-        && signature.s < Scalar::<Secp256k1>::group_order() - signature.s.clone()
-    {
-        Ok(())
-    } else {
-        Err(multi_party_ecdsa::Error::InvalidSig)
-    }
-}
-
+//
+// pub fn verify(
+//     signature: &Party1PartialAdaptor,
+//     pubkey: &Point<Secp256k1>,
+//     message: &BigInt,
+// ) -> Result<(), multi_party_ecdsa::Error> {
+//     let s_fe = Scalar::<Secp256k1>::from(&signature.s);
+//     let rx_fe = Scalar::<Secp256k1>::from(&signature.r);
+//
+//     let s_inv_fe = s_fe.invert().unwrap();
+//     let e_fe: Scalar<Secp256k1> =
+//         Scalar::<Secp256k1>::from(&message.mod_floor(Scalar::<Secp256k1>::group_order()));
+//     let u1 = Point::generator() * e_fe * &s_inv_fe;
+//     let u2 = &*pubkey * rx_fe * &s_inv_fe;
+//
+//     // second condition is against malleability
+//     let rx_bytes = &BigInt::to_bytes(&signature.r)[..];
+//     let u1_plus_u2_bytes = &BigInt::to_bytes(&(u1 + u2).x_coord().unwrap())[..];
+//
+//     if rx_bytes.ct_eq(u1_plus_u2_bytes).unwrap_u8() == 1
+//         && signature.s < Scalar::<Secp256k1>::group_order() - signature.s.clone()
+//     {
+//         Ok(())
+//     } else {
+//         Err(multi_party_ecdsa::Error::InvalidSig)
+//     }
+// }
+//
 pub fn generate_h1_h2_n_tilde() -> (BigInt, BigInt, BigInt, BigInt) {
     //note, should be safe primes:
     // let (ek_tilde, dk_tilde) = Paillier::keypair_safe_primes().keys();;
