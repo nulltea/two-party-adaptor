@@ -1,18 +1,3 @@
-/*
-    Multi-party ECDSA
-
-    Copyright 2018 by Kzen Networks
-
-    This file is part of Multi-party ECDSA library
-    (https://github.com/KZen-networks/multi-party-ecdsa)
-
-    Multi-party ECDSA is free software: you can redistribute
-    it and/or modify it under the terms of the GNU General Public
-    License as published by the Free Software Foundation, either
-    version 3 of the License, or (at your option) any later version.
-
-    @license GPL-3.0+ <https://github.com/KZen-networks/multi-party-ecdsa/blob/master/LICENSE>
-*/
 use std::cmp;
 
 use centipede::juggling::proof_system::{Helgamalsegmented, Witness};
@@ -34,8 +19,8 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zk_paillier::zkproofs::NiCorrectKeyProof;
 
-use crate::party_two::EphKeyGenFirstMsg as Party2EphKeyGenFirstMessage;
-use crate::party_two::EphKeyGenSecondMsg as Party2EphKeyGenSecondMessage;
+use crate::party_two::{sign::PreSignMsg1 as Party2PreSignMsg1, Signature};
+use crate::party_two::sign::PreSignMsg2 as Party2PreSignMsg2;
 use crate::SECURITY_BITS;
 
 use multi_party_ecdsa::utilities::mta::MessageB;
@@ -44,7 +29,6 @@ use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackStatement;
 use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackWitness;
 use zk_paillier::zkproofs::{CompositeDLogProof, DLogStatement};
 
-//****************** Begin: Party One structs ******************//
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EcKeyPair {
     pub public_share: Point<Secp256k1>,
@@ -57,17 +41,6 @@ pub struct CommWitness {
     pub zk_pok_blind_factor: BigInt,
     pub public_share: Point<Secp256k1>,
     pub d_log_proof: DLogProof<Secp256k1, Sha256>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KeyGenFirstMsg {
-    pub pk_commitment: BigInt,
-    pub zk_pok_commitment: BigInt,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct KeyGenSecondMsg {
-    pub comm_witness: CommWitness,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,20 +92,22 @@ pub struct EphEcKeyPair {
     secret_share: Scalar<Secp256k1>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EphKeyGenFirstMsg {
-    pub d_log_proof: ECDDHProof<Secp256k1, Sha256>,
-    pub public_share: Point<Secp256k1>,
-    pub c: Point<Secp256k1>, //c = secret_share * base_point2
-}
+pub mod keygen {
+    use super::*;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EphKeyGenSecondMsg {}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct KeyGenMsg1 {
+        pub pk_commitment: BigInt,
+        pub zk_pok_commitment: BigInt,
+    }
 
-//****************** End: Party One structs ******************//
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct KeyGenMsg2 {
+        pub comm_witness: CommWitness,
+    }
 
-impl KeyGenFirstMsg {
-    pub fn create_commitments() -> (KeyGenFirstMsg, CommWitness, EcKeyPair) {
+    // Party 1 - Round 1
+    pub fn generate_and_commit() -> (KeyGenMsg1, CommWitness, EcKeyPair) {
         let base = Point::generator();
 
         let secret_share = Scalar::<Secp256k1>::random();
@@ -159,7 +134,7 @@ impl KeyGenFirstMsg {
             secret_share,
         };
         (
-            KeyGenFirstMsg {
+            KeyGenMsg1 {
                 pk_commitment,
                 zk_pok_commitment,
             },
@@ -173,63 +148,20 @@ impl KeyGenFirstMsg {
         )
     }
 
-    pub fn create_commitments_with_fixed_secret_share(
-        secret_share: Scalar<Secp256k1>,
-    ) -> (KeyGenFirstMsg, CommWitness, EcKeyPair) {
-        let base = Point::generator();
-        let public_share = base * &secret_share;
-
-        let d_log_proof = DLogProof::<Secp256k1, Sha256>::prove(&secret_share);
-
-        let pk_commitment_blind_factor = BigInt::sample(SECURITY_BITS);
-        let pk_commitment =
-            HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
-                &BigInt::from_bytes(public_share.to_bytes(true).as_ref()),
-                &pk_commitment_blind_factor,
-            );
-
-        let zk_pok_blind_factor = BigInt::sample(SECURITY_BITS);
-        let zk_pok_commitment =
-            HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
-                &BigInt::from_bytes(d_log_proof.pk_t_rand_commitment.to_bytes(true).as_ref()),
-                &zk_pok_blind_factor,
-            );
-
-        let ec_key_pair = EcKeyPair {
-            public_share,
-            secret_share,
-        };
-        (
-            KeyGenFirstMsg {
-                pk_commitment,
-                zk_pok_commitment,
-            },
-            CommWitness {
-                pk_commitment_blind_factor,
-                zk_pok_blind_factor,
-                public_share: ec_key_pair.public_share.clone(),
-                d_log_proof,
-            },
-            ec_key_pair,
-        )
-    }
-}
-
-impl KeyGenSecondMsg {
     pub fn verify_and_decommit(
         comm_witness: CommWitness,
         proof: &DLogProof<Secp256k1, Sha256>,
-    ) -> Result<KeyGenSecondMsg, ProofError> {
+    ) -> Result<KeyGenMsg2, ProofError> {
         DLogProof::verify(proof)?;
-        Ok(KeyGenSecondMsg { comm_witness })
+        Ok(KeyGenMsg2 { comm_witness })
     }
-}
 
-pub fn compute_pubkey(
-    party_one_private: &Party1Private,
-    other_share_public_share: &Point<Secp256k1>,
-) -> Point<Secp256k1> {
-    other_share_public_share * &party_one_private.x1
+    pub fn compute_pubkey(
+        local_private: &EcKeyPair,
+        other_share_public_share: &Point<Secp256k1>,
+    ) -> Point<Secp256k1> {
+        other_share_public_share * &local_private.secret_share
+    }
 }
 
 impl Party1Private {
@@ -240,6 +172,7 @@ impl Party1Private {
             c_key_randomness: paillier_key.randomness.clone(),
         }
     }
+
     pub fn refresh_private_key(
         party_one_private: &Party1Private,
         factor: &BigInt,
@@ -397,46 +330,60 @@ impl PaillierKeyPair {
     }
 }
 
-impl EphKeyGenFirstMsg {
+pub mod sign {
+    use super::*;
+
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct PreSignMsg1 {
+        pub d_log_proof: ECDDHProof<Secp256k1, Sha256>,
+        pub public_share: Point<Secp256k1>,
+        pub c: Point<Secp256k1>, //c = secret_share * base_point2
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct EncryptedSignature {
+        pub sd_prime: BigInt,
+    }
+
+
     // P1's  first massage (phase 1)
-    pub fn create() -> (EphKeyGenFirstMsg, EphEcKeyPair) {
+    pub fn generate_round1() -> (PreSignMsg1, EphEcKeyPair) {
         let base = Point::generator();
-        let secret_share = Scalar::<Secp256k1>::random();
-        let public_share = &*base * &secret_share;
+        let k1 = Scalar::<Secp256k1>::random();
+        let R1 = &*base * &k1;
         let h = Point::<Secp256k1>::base_point2();
 
-        let c = h * &secret_share;
+        let c = h * &k1;
         let w = ECDDHWitness {
-            x: secret_share.clone(),
+            x: k1.clone(),
         };
         let delta = ECDDHStatement {
             g1: base.to_point(),
-            h1: public_share.clone(),
+            h1: R1.clone(),
             g2: h.clone(),
             h2: c.clone(),
         };
         let d_log_proof = ECDDHProof::prove(&w, &delta);
         let ec_key_pair = EphEcKeyPair {
-            public_share: public_share.clone(),
-            secret_share,
+            public_share: R1.clone(),
+            secret_share: k1,
         };
         (
-            EphKeyGenFirstMsg {
+            PreSignMsg1 {
                 d_log_proof,
-                public_share,
+                public_share: R1,
                 c,
             },
             ec_key_pair,
         )
     }
-}
 
-impl EphKeyGenSecondMsg {
     // P1's second message (phase 4)
     pub fn verify_commitments_and_dlog_proof(
-        party_two_first_message: &Party2EphKeyGenFirstMessage,
-        party_two_second_message: &Party2EphKeyGenSecondMessage,
-    ) -> Result<EphKeyGenSecondMsg, ProofError> {
+        party_two_first_message: &Party2PreSignMsg1,
+        party_two_second_message: &Party2PreSignMsg2,
+    ) -> Result<(), ProofError> {
         let party_two_pk_commitment = &party_two_first_message.pk_commitment;
         let party_two_zk_pok_commitment = &party_two_first_message.zk_pok_commitment;
         let party_two_zk_pok_blind_factor =
@@ -449,19 +396,19 @@ impl EphKeyGenSecondMsg {
         let mut flag = true;
         if party_two_pk_commitment
             != &HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
-                &BigInt::from_bytes(party_two_public_share.to_bytes(true).as_ref()),
-                party_two_pk_commitment_blind_factor,
-            )
+            &BigInt::from_bytes(party_two_public_share.to_bytes(true).as_ref()),
+            party_two_pk_commitment_blind_factor,
+        )
         {
             flag = false
         }
         if party_two_zk_pok_commitment
             != &HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
-                &Sha256::new()
-                    .chain_points([&party_two_d_log_proof.a1, &party_two_d_log_proof.a2])
-                    .result_bigint(),
-                party_two_zk_pok_blind_factor,
-            )
+            &Sha256::new()
+                .chain_points([&party_two_d_log_proof.a1, &party_two_d_log_proof.a2])
+                .result_bigint(),
+            party_two_zk_pok_blind_factor,
+        )
         {
             flag = false
         }
@@ -477,23 +424,21 @@ impl EphKeyGenSecondMsg {
             h2: party_two_second_message.comm_witness.c.clone(),
         };
         party_two_d_log_proof.verify(&delta)?;
-        Ok(EphKeyGenSecondMsg {})
+        Ok(())
     }
-}
 
-impl Party1PartialAdaptor {
-    // P1's third message (phase 5)
-    pub fn compute(
+    // P1's second message (phase 5)
+    pub fn encrypted_sign(
         party_one_private: &Party1Private,
         party_one_public: &Point<Secp256k1>,
         partial_sig_c3: &BigInt,
-        ephemeral_local_share: &EphEcKeyPair,
+        k1: &EphEcKeyPair,
         ephemeral_other_public_share: &Point<Secp256k1>,
         r3_pub: &Point<Secp256k1>,
         message: &BigInt,
-    ) -> Party1PartialAdaptor {
+    ) -> EncryptedSignature {
         // compute r = k1 * R3
-        let r = r3_pub * &ephemeral_local_share.secret_share;
+        let r = r3_pub * &k1.secret_share;
         let rx = Scalar::<Secp256k1>::from_bigint(&r.x_coord().unwrap()
             .mod_floor(Scalar::<Secp256k1>::group_order()));
 
@@ -504,8 +449,6 @@ impl Party1PartialAdaptor {
             .0;
         let s_prime = Scalar::<Secp256k1>::from_bigint(&s_tag.mod_floor(Scalar::<Secp256k1>::group_order()));
 
-        let r2s = ephemeral_other_public_share * &s_prime;
-
         // compute U = r * Q + m * G.
         let r_q = party_one_public * &rx;
         let m_gen = Point::<Secp256k1>::generator() * Scalar::<Secp256k1>::from_bigint(&message);
@@ -515,112 +458,99 @@ impl Party1PartialAdaptor {
             panic!("invalid pre-signature")
         }
 
-        // compute r = k1* R2
-        let r = ephemeral_other_public_share.clone() * &ephemeral_local_share.secret_share;
-
-        let rx = r
-            .x_coord()
-            .unwrap()
-            .mod_floor(Scalar::<Secp256k1>::group_order());
-
-        let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
+        let k1_inv = k1.secret_share.invert().unwrap();
 
         let sd_prime = k1_inv * &s_prime;
 
-        // let s_tag = Paillier::decrypt(
-        //     &party_one_private.paillier_priv,
-        //     &RawCiphertext::from(partial_sig_c3),
-        // )
-        // .0;
-        // let s_prime_tag = s_tag.mod_floor(Scalar::<Secp256k1>::group_order());
-        //
-        // let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
-        // let s_tag_tag = s_tag_fe * k1_inv;
-        // let s_tag_tag_bn = s_tag_tag.to_bigint();
-        //
-        // let s = cmp::min(
-        //     s_tag_tag_bn.clone(),
-        //     Scalar::<Secp256k1>::group_order().clone() - s_tag_tag_bn,
-        // );
-
-        Party1PartialAdaptor { sd_prime: sd_prime.to_bigint() }
+        EncryptedSignature { sd_prime: sd_prime.to_bigint() }
     }
 
-    // pub fn compute_with_recid(
-    //     party_one_private: &Party1Private,
-    //     partial_sig_c3: &BigInt,
-    //     ephemeral_local_share: &EphEcKeyPair,
-    //     ephemeral_other_public_share: &Point<Secp256k1>,
-    // ) -> SignatureRecid {
-    //     //compute r = k2* R1
-    //     let r = ephemeral_other_public_share * &ephemeral_local_share.secret_share;
-    //
-    //     let rx = r
-    //         .x_coord()
-    //         .unwrap()
-    //         .mod_floor(Scalar::<Secp256k1>::group_order());
-    //     let ry = r
-    //         .y_coord()
-    //         .unwrap()
-    //         .mod_floor(Scalar::<Secp256k1>::group_order());
-    //     let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
-    //
-    //     let s_tag = Paillier::decrypt(
-    //         &party_one_private.paillier_priv,
-    //         &RawCiphertext::from(partial_sig_c3),
-    //     )
-    //     .0;
-    //     let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
-    //     let s_tag_tag = s_tag_fe * k1_inv;
-    //     let s_tag_tag_bn = s_tag_tag.to_bigint();
-    //     let s = cmp::min(
-    //         s_tag_tag_bn.clone(),
-    //         Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn,
-    //     );
-    //
-    //     /*
-    //      Calculate recovery id - it is not possible to compute the public key out of the signature
-    //      itself. Recovery id is used to enable extracting the public key uniquely.
-    //      1. id = R.y & 1
-    //      2. if (s > curve.q / 2) id = id ^ 1
-    //     */
-    //     let is_ry_odd = ry.test_bit(0);
-    //     let mut recid = if is_ry_odd { 1 } else { 0 };
-    //     if s_tag_tag_bn > Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn {
-    //         recid ^= 1;
-    //     }
-    //
-    //     SignatureRecid { s, r: rx, recid }
-    // }
+    pub fn recover_witness(adaptor: EncryptedSignature, signature: &Signature) -> Scalar<Secp256k1> {
+        // compute s''^(-1).
+        let sd_prime_inv = Scalar::<Secp256k1>::from_bigint(&adaptor.sd_prime).invert().unwrap();
+
+        // compute t = (s * s''^(-1))^(-1)
+        let s = Scalar::<Secp256k1>::from_bigint(&signature.s);
+        let y = s * sd_prime_inv;
+
+        y.invert().unwrap()
+    }
 }
+
+// pub fn compute_with_recid(
+//     party_one_private: &Party1Private,
+//     partial_sig_c3: &BigInt,
+//     ephemeral_local_share: &EphEcKeyPair,
+//     ephemeral_other_public_share: &Point<Secp256k1>,
+// ) -> SignatureRecid {
+//     //compute r = k2* R1
+//     let r = ephemeral_other_public_share * &ephemeral_local_share.secret_share;
 //
-// pub fn verify(
-//     signature: &Party1PartialAdaptor,
-//     pubkey: &Point<Secp256k1>,
-//     message: &BigInt,
-// ) -> Result<(), multi_party_ecdsa::Error> {
-//     let s_fe = Scalar::<Secp256k1>::from(&signature.s);
-//     let rx_fe = Scalar::<Secp256k1>::from(&signature.r);
+//     let rx = r
+//         .x_coord()
+//         .unwrap()
+//         .mod_floor(Scalar::<Secp256k1>::group_order());
+//     let ry = r
+//         .y_coord()
+//         .unwrap()
+//         .mod_floor(Scalar::<Secp256k1>::group_order());
+//     let k1_inv = ephemeral_local_share.secret_share.invert().unwrap();
 //
-//     let s_inv_fe = s_fe.invert().unwrap();
-//     let e_fe: Scalar<Secp256k1> =
-//         Scalar::<Secp256k1>::from(&message.mod_floor(Scalar::<Secp256k1>::group_order()));
-//     let u1 = Point::generator() * e_fe * &s_inv_fe;
-//     let u2 = &*pubkey * rx_fe * &s_inv_fe;
+//     let s_tag = Paillier::decrypt(
+//         &party_one_private.paillier_priv,
+//         &RawCiphertext::from(partial_sig_c3),
+//     )
+//     .0;
+//     let s_tag_fe = Scalar::<Secp256k1>::from(s_tag.as_ref());
+//     let s_tag_tag = s_tag_fe * k1_inv;
+//     let s_tag_tag_bn = s_tag_tag.to_bigint();
+//     let s = cmp::min(
+//         s_tag_tag_bn.clone(),
+//         Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn,
+//     );
 //
-//     // second condition is against malleability
-//     let rx_bytes = &BigInt::to_bytes(&signature.r)[..];
-//     let u1_plus_u2_bytes = &BigInt::to_bytes(&(u1 + u2).x_coord().unwrap())[..];
-//
-//     if rx_bytes.ct_eq(u1_plus_u2_bytes).unwrap_u8() == 1
-//         && signature.s < Scalar::<Secp256k1>::group_order() - signature.s.clone()
-//     {
-//         Ok(())
-//     } else {
-//         Err(multi_party_ecdsa::Error::InvalidSig)
+//     /*
+//      Calculate recovery id - it is not possible to compute the public key out of the signature
+//      itself. Recovery id is used to enable extracting the public key uniquely.
+//      1. id = R.y & 1
+//      2. if (s > curve.q / 2) id = id ^ 1
+//     */
+//     let is_ry_odd = ry.test_bit(0);
+//     let mut recid = if is_ry_odd { 1 } else { 0 };
+//     if s_tag_tag_bn > Scalar::<Secp256k1>::group_order() - &s_tag_tag_bn {
+//         recid ^= 1;
 //     }
-// }
 //
+//     SignatureRecid { s, r: rx, recid }
+// }
+
+pub fn verify_signature(
+    signature: &Signature,
+    pubkey: &Point<Secp256k1>,
+    message: &BigInt,
+) -> Result<(), multi_party_ecdsa::Error> {
+    let s_fe = Scalar::<Secp256k1>::from(&signature.s);
+    let rx_fe = Scalar::<Secp256k1>::from(&signature.r);
+
+    let s_inv_fe = s_fe.invert().unwrap();
+    let e_fe: Scalar<Secp256k1> =
+        Scalar::<Secp256k1>::from(&message.mod_floor(Scalar::<Secp256k1>::group_order()));
+    let u1 = Point::generator() * e_fe * &s_inv_fe;
+    let u2 = &*pubkey * rx_fe * &s_inv_fe;
+
+    // second condition is against malleability
+    let rx_bytes = &BigInt::to_bytes(&signature.r)[..];
+    let u1_plus_u2_bytes = &BigInt::to_bytes(&(u1 + u2).x_coord().unwrap())[..];
+
+    if rx_bytes.ct_eq(u1_plus_u2_bytes).unwrap_u8() == 1
+        && signature.s < Scalar::<Secp256k1>::group_order() - signature.s.clone()
+    {
+        Ok(())
+    } else {
+        Err(multi_party_ecdsa::Error::InvalidSig)
+    }
+}
+
 pub fn generate_h1_h2_n_tilde() -> (BigInt, BigInt, BigInt, BigInt) {
     //note, should be safe primes:
     // let (ek_tilde, dk_tilde) = Paillier::keypair_safe_primes().keys();;
