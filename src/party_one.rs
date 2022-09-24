@@ -17,9 +17,8 @@ use paillier::{DecryptionKey, EncryptionKey, Randomness, RawCiphertext, RawPlain
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use zk_paillier::zkproofs::NiCorrectKeyProof;
 
-use crate::party_two::{sign::PreSignMsg1 as Party2PreSignMsg1, Signature};
+use crate::party_two::{sign::PreSignMsg1 as Party2PreSignMsg1};
 use crate::party_two::sign::PreSignMsg2 as Party2PreSignMsg2;
 use crate::SECURITY_BITS;
 
@@ -27,7 +26,7 @@ use multi_party_ecdsa::utilities::mta::MessageB;
 use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackProof;
 use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackStatement;
 use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackWitness;
-use zk_paillier::zkproofs::{CompositeDLogProof, DLogStatement};
+use zk_paillier::zkproofs::{CompositeDLogProof, DLogStatement, NiCorrectKeyProof};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EcKeyPair {
@@ -92,6 +91,12 @@ pub struct EphEcKeyPair {
     secret_share: Scalar<Secp256k1>,
 }
 
+impl EcKeyPair {
+    pub fn export(&self) -> BigInt {
+        self.secret_share.to_bigint()
+    }
+}
+
 pub mod keygen {
     use super::*;
 
@@ -99,15 +104,21 @@ pub mod keygen {
     pub struct KeyGenMsg1 {
         pub pk_commitment: BigInt,
         pub zk_pok_commitment: BigInt,
+        pub public_share: Point<Secp256k1>
     }
 
     #[derive(Debug, Serialize, Deserialize)]
     pub struct KeyGenMsg2 {
         pub comm_witness: CommWitness,
+        pub ek: EncryptionKey,
+        pub c_key: BigInt,
+        pub correct_key_proof: NiCorrectKeyProof,
+        pub pdl_statement: PDLwSlackStatement,
+        pub pdl_proof: PDLwSlackProof,
+        pub composite_dlog_proof: CompositeDLogProof,
     }
 
-    // Party 1 - Round 1
-    pub fn generate_and_commit() -> (KeyGenMsg1, CommWitness, EcKeyPair) {
+    pub fn first_message() -> (KeyGenMsg1, CommWitness, EcKeyPair) {
         let base = Point::generator();
 
         let secret_share = Scalar::<Secp256k1>::random();
@@ -137,6 +148,7 @@ pub mod keygen {
             KeyGenMsg1 {
                 pk_commitment,
                 zk_pok_commitment,
+                public_share: ec_key_pair.public_share.clone(),
             },
             CommWitness {
                 pk_commitment_blind_factor,
@@ -148,12 +160,44 @@ pub mod keygen {
         )
     }
 
-    pub fn verify_and_decommit(
+    pub fn second_message(
+        comm_witness: CommWitness,
+        ec_key_pair_party1: &EcKeyPair,
+        proof: &DLogProof<Secp256k1, Sha256>
+    ) -> Result<(KeyGenMsg2, PaillierKeyPair, Party1Private), ProofError> {
+        let comm_witness = verify_and_decommit(comm_witness, proof)?;
+
+        let paillier_key_pair =
+            PaillierKeyPair::generate_keypair_and_encrypted_share(&ec_key_pair_party1);
+
+        // party one set her private key:
+        let party_one_private = Party1Private::set_private_key(&ec_key_pair_party1, &paillier_key_pair);
+
+        let (pdl_statement, pdl_proof, composite_dlog_proof) = PaillierKeyPair::pdl_proof(&party_one_private, &paillier_key_pair);
+
+        let correct_key_proof = PaillierKeyPair::generate_ni_proof_correct_key(&paillier_key_pair);
+
+        Ok((
+            KeyGenMsg2 {
+                comm_witness,
+                ek: paillier_key_pair.ek.clone(),
+                c_key: paillier_key_pair.encrypted_share.clone(),
+                correct_key_proof,
+                pdl_statement,
+                pdl_proof,
+                composite_dlog_proof,
+            },
+            paillier_key_pair,
+            party_one_private,
+        ))
+    }
+
+    fn verify_and_decommit(
         comm_witness: CommWitness,
         proof: &DLogProof<Secp256k1, Sha256>,
-    ) -> Result<KeyGenMsg2, ProofError> {
+    ) -> Result<CommWitness, ProofError> {
         DLogProof::verify(proof)?;
-        Ok(KeyGenMsg2 { comm_witness })
+        Ok(comm_witness)
     }
 
     pub fn compute_pubkey(
@@ -341,14 +385,9 @@ pub mod sign {
         pub c: Point<Secp256k1>, //c = secret_share * base_point2
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct EncryptedSignature {
-        pub sd_prime: BigInt,
-    }
-
 
     // P1's  first massage (phase 1)
-    pub fn generate_round1() -> (PreSignMsg1, EphEcKeyPair) {
+    pub fn first_message() -> (PreSignMsg1, EphEcKeyPair) {
         let base = Point::generator();
         let k1 = Scalar::<Secp256k1>::random();
         let R1 = &*base * &k1;
@@ -428,7 +467,7 @@ pub mod sign {
     }
 
     // P1's second message (phase 5)
-    pub fn encrypted_sign(
+    pub fn second_message(
         party_one_private: &Party1Private,
         party_one_public: &Point<Secp256k1>,
         partial_sig_c3: &BigInt,
@@ -436,7 +475,7 @@ pub mod sign {
         ephemeral_other_public_share: &Point<Secp256k1>,
         r3_pub: &Point<Secp256k1>,
         message: &BigInt,
-    ) -> EncryptedSignature {
+    ) -> crate::EncryptedSignature {
         // compute r = k1 * R3
         let r = r3_pub * &k1.secret_share;
         let rx = Scalar::<Secp256k1>::from_bigint(&r.x_coord().unwrap()
@@ -462,10 +501,10 @@ pub mod sign {
 
         let sd_prime = k1_inv * &s_prime;
 
-        EncryptedSignature { sd_prime: sd_prime.to_bigint() }
+        crate::EncryptedSignature { sd_prime: sd_prime.to_bigint() }
     }
 
-    pub fn recover_witness(adaptor: EncryptedSignature, signature: &Signature) -> Scalar<Secp256k1> {
+    pub fn recover_witness(adaptor: crate::EncryptedSignature, signature: &crate::Signature) -> Scalar<Secp256k1> {
         // compute s''^(-1).
         let sd_prime_inv = Scalar::<Secp256k1>::from_bigint(&adaptor.sd_prime).invert().unwrap();
 
@@ -525,7 +564,7 @@ pub mod sign {
 // }
 
 pub fn verify_signature(
-    signature: &Signature,
+    signature: &crate::Signature,
     pubkey: &Point<Secp256k1>,
     message: &BigInt,
 ) -> Result<(), multi_party_ecdsa::Error> {
