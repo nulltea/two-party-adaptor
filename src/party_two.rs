@@ -21,10 +21,11 @@ use crate::party_one::sign::PreSignMsg1 as Party1SignMsg1;
 use crate::party_one::keygen::KeyGenMsg1 as Party1KeyGenMsg1;
 use crate::party_one::keygen::KeyGenMsg2 as Party1KeyGenMsg2;
 use crate::SECURITY_BITS;
-use multi_party_ecdsa::utilities::mta::{MessageA, MessageB};
 
-use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackProof;
-use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackStatement;
+use crate::utilities::mta::{MessageA, MessageB};
+use crate::utilities::zk_pdl_with_slack::PDLwSlackProof;
+use crate::utilities::zk_pdl_with_slack::PDLwSlackStatement;
+
 use thiserror::Error;
 use zk_paillier::zkproofs::{CompositeDLogProof, DLogStatement};
 
@@ -40,7 +41,7 @@ const PAILLIER_KEY_SIZE: usize = 2048;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EcKeyPair {
     pub public_share: Point<Secp256k1>,
-    secret_share: Scalar<Secp256k1>,
+    pub secret_share: Scalar<Secp256k1>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,7 +84,7 @@ pub struct PDLSecondMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EccKeyPair {
     pub public_share: Point<Secp256k1>,
-    secret_share: Scalar<Secp256k1>,
+    pub secret_share: Scalar<Secp256k1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -325,6 +326,7 @@ impl PaillierPublic {
 }
 
 pub mod sign {
+    use std::cmp;
     use crate::EncryptedSignature;
     use super::*;
 
@@ -339,6 +341,7 @@ pub mod sign {
     //     pub comm_witness: DlogCommWitness,
     // }
 
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct PreSignRound1Local {
         pub k2_pair: EccKeyPair,
         pub k3_pair: EccKeyPair,
@@ -350,7 +353,7 @@ pub mod sign {
     pub struct PreSignMsg2 {
         pub c3: BigInt,
         pub comm_witness: DlogCommWitness,
-        pub k3_pair: EccKeyPair, // todo: ensure that it's secure to share k3 scalar
+        pub K3: Point<Secp256k1>,
         pub message: BigInt
     }
 
@@ -450,7 +453,7 @@ pub mod sign {
         encrypted_secret_share: &BigInt,
         local_share: &EcKeyPair,
         ephemeral_local_share: &EccKeyPair,
-        ephemeral_other_public_share: &Point<Secp256k1>,
+        K1: &Point<Secp256k1>,
         k3_pair: &EccKeyPair,
         message: &BigInt,
     ) -> Result<PreSignMsg2, ProofError> {
@@ -459,8 +462,8 @@ pub mod sign {
         let local_share = Party2Private::set_private_key(local_share);
 
         let q = Scalar::<Secp256k1>::group_order();
-        //compute r = r3* R1
-        let r = ephemeral_other_public_share * &k3_pair.secret_share;
+        // compute r = k3 * K1
+        let r = K1 * &k3_pair.secret_share;
 
         let rx = r.x_coord().unwrap().mod_floor(q);
         let rho = BigInt::sample_below(&q.pow(2));
@@ -482,7 +485,7 @@ pub mod sign {
         Ok(PreSignMsg2 {
             c3: Paillier::add(ek, c2, c1).0.into_owned(),
             comm_witness: k2,
-            k3_pair: k3_pair.clone(),
+            K3: k3_pair.public_share.clone(),
             message: message.clone()
         })
     }
@@ -492,15 +495,19 @@ pub mod sign {
         adaptor: &crate::EncryptedSignature,
         decryption_key: &Scalar<Secp256k1>,
         r1_pub: &Point<Secp256k1>,
-        k3: &EccKeyPair,
+        k3: &Scalar<Secp256k1>,
     ) -> crate::Signature {
         let y = decryption_key;
         let y_inv = y.invert().unwrap();
         // compute s = s'' * y^-1
         let s = y_inv * Scalar::from_bigint(&adaptor.sd_prime);
         let s = s.to_bigint();
+        let s = cmp::min(
+            s.clone(),
+            Scalar::<Secp256k1>::group_order().clone() - s,
+        );
 
-        let r = r1_pub * &k3.secret_share;
+        let r = r1_pub * k3;
         let r_x = r.x_coord().unwrap();
 
         crate::Signature {

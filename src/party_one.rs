@@ -22,16 +22,16 @@ use crate::party_two::{sign::PreSignMsg1 as Party2PreSignMsg1};
 use crate::party_two::sign::PreSignMsg2 as Party2PreSignMsg2;
 use crate::SECURITY_BITS;
 
-use multi_party_ecdsa::utilities::mta::MessageB;
-use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackProof;
-use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackStatement;
-use multi_party_ecdsa::utilities::zk_pdl_with_slack::PDLwSlackWitness;
+use crate::utilities::mta::MessageB;
+use crate::utilities::zk_pdl_with_slack::PDLwSlackProof;
+use crate::utilities::zk_pdl_with_slack::PDLwSlackStatement;
+use crate::utilities::zk_pdl_with_slack::PDLwSlackWitness;
 use zk_paillier::zkproofs::{CompositeDLogProof, DLogStatement, NiCorrectKeyProof};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EcKeyPair {
     pub public_share: Point<Secp256k1>,
-    secret_share: Scalar<Secp256k1>,
+    pub secret_share: Scalar<Secp256k1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,12 +91,6 @@ pub struct EphEcKeyPair {
     secret_share: Scalar<Secp256k1>,
 }
 
-impl EcKeyPair {
-    pub fn export(&self) -> BigInt {
-        self.secret_share.to_bigint()
-    }
-}
-
 pub mod keygen {
     use super::*;
 
@@ -107,7 +101,7 @@ pub mod keygen {
         pub public_share: Point<Secp256k1>
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct KeyGenMsg2 {
         pub comm_witness: CommWitness,
         pub ek: EncryptionKey,
@@ -284,7 +278,7 @@ impl Party1Private {
     pub fn to_mta_message_b(
         &self,
         message_b: MessageB,
-    ) -> Result<(Scalar<Secp256k1>, BigInt), multi_party_ecdsa::Error> {
+    ) -> Result<(Scalar<Secp256k1>, BigInt), crate::Error> {
         message_b.verify_proofs_get_alpha(&self.paillier_priv, &self.x1)
     }
 }
@@ -378,7 +372,7 @@ pub mod sign {
     use super::*;
 
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct PreSignMsg1 {
         pub d_log_proof: ECDDHProof<Secp256k1, Sha256>,
         pub public_share: Point<Secp256k1>,
@@ -421,17 +415,16 @@ pub mod sign {
     // P1's second message (phase 4)
     pub fn verify_commitments_and_dlog_proof(
         party_two_first_message: &Party2PreSignMsg1,
-        party_two_second_message: &Party2PreSignMsg2,
+        party_two_second_message_comm_witness: &crate::party_two::DlogCommWitness,
     ) -> Result<(), ProofError> {
         let party_two_pk_commitment = &party_two_first_message.pk_commitment;
         let party_two_zk_pok_commitment = &party_two_first_message.zk_pok_commitment;
         let party_two_zk_pok_blind_factor =
-            &party_two_second_message.comm_witness.zk_pok_blind_factor;
-        let party_two_public_share = &party_two_second_message.comm_witness.public_share;
-        let party_two_pk_commitment_blind_factor = &party_two_second_message
-            .comm_witness
+            &party_two_second_message_comm_witness.zk_pok_blind_factor;
+        let party_two_public_share = &party_two_second_message_comm_witness.public_share;
+        let party_two_pk_commitment_blind_factor = &party_two_second_message_comm_witness
             .pk_commitment_blind_factor;
-        let party_two_d_log_proof = &party_two_second_message.comm_witness.d_log_proof;
+        let party_two_d_log_proof = &party_two_second_message_comm_witness.d_log_proof;
         let mut flag = true;
         if party_two_pk_commitment
             != &HashCommitment::<Sha256>::create_commitment_with_user_defined_randomness(
@@ -460,7 +453,7 @@ pub mod sign {
             g1: Point::generator().to_point(),
             h1: party_two_public_share.clone(),
             g2: Point::<Secp256k1>::base_point2().clone(),
-            h2: party_two_second_message.comm_witness.c.clone(),
+            h2: party_two_second_message_comm_witness.c.clone(),
         };
         party_two_d_log_proof.verify(&delta)?;
         Ok(())
@@ -567,7 +560,7 @@ pub fn verify_signature(
     signature: &crate::Signature,
     pubkey: &Point<Secp256k1>,
     message: &BigInt,
-) -> Result<(), multi_party_ecdsa::Error> {
+) -> Result<(), crate::Error> {
     let s_fe = Scalar::<Secp256k1>::from(&signature.s);
     let rx_fe = Scalar::<Secp256k1>::from(&signature.r);
 
@@ -586,7 +579,7 @@ pub fn verify_signature(
     {
         Ok(())
     } else {
-        Err(multi_party_ecdsa::Error::InvalidSig)
+        Err(crate::Error::InvalidSig)
     }
 }
 

@@ -22,6 +22,6 @@ sha2 = "0.9"
 paillier = {version = "0.4.2", package = "kzen-paillier", default-features = false}
 class_group = {version = "0.6", default-features = false, optional = true}
 
-[dependencies.multi-party-ecdsa]
-git = "https://github.com/KZen-networks/multi-party-ecdsa"
-default-features = false
+#[dependencies.multi-party-ecdsa]
+#git = "https://github.com/KZen-networks/multi-party-ecdsa"
+#default-features = false

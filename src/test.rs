@@ -38,7 +38,7 @@ fn test_two_party_sign() {
 
     let _ = party_one::sign::verify_commitments_and_dlog_proof(
         &p2_presign_msg1,
-        &partial_sig,
+        &partial_sig.comm_witness,
     )
         .expect("failed to verify commitments and DLog proof");
 
